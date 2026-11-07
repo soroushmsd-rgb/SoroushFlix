@@ -1,0 +1,432 @@
+name: Build Android TV APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      CI: true
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Create TV project
+        run: |
+          npx --yes @react-native-community/cli@latest init DelfanTV \
+            --template @react-native-tvos/template-tv \
+            --skip-install \
+            --skip-git-init \
+            --pm npm
+
+      - name: Install dependencies
+        run: |
+          cd DelfanTV
+          npm install --legacy-peer-deps
+          npm install --legacy-peer-deps \
+            react-native-video@^6.6.4 \
+            react-native-linear-gradient@^2.8.3
+
+      - name: Write app files
+        run: |
+          cd DelfanTV
+          rm -f App.tsx
+          mkdir -p src/components src/screens assets/fonts
+          cat > App.js <<'END_OF_FILE'
+          import React, { useEffect, useState } from 'react';
+          import { BackHandler, View } from 'react-native';
+          import Main from './src/screens/Main';
+          import Details from './src/screens/Details';
+          import Player from './src/screens/Player';
+
+          export default function App() {
+            const [stack, setStack] = useState([{ name: 'Main', params: {} }]);
+            const current = stack[stack.length - 1];
+
+            const navigation = {
+              navigate: (name, params = {}) => setStack(s => [...s, { name, params }]),
+              goBack: () => setStack(s => (s.length > 1 ? s.slice(0, -1) : s)),
+            };
+
+            useEffect(() => {
+              const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+                if (stack.length > 1) {
+                  setStack(s => s.slice(0, -1));
+                  return true;
+                }
+                return false;
+              });
+              return () => sub.remove();
+            }, [stack.length]);
+
+            return (
+              <View style={{ flex: 1, backgroundColor: '#000' }}>
+                {current.name === 'Main' && <Main navigation={navigation} route={current} />}
+                {current.name === 'Details' && <Details navigation={navigation} route={current} />}
+                {current.name === 'Player' && <Player navigation={navigation} route={current} />}
+              </View>
+            );
+          }
+          END_OF_FILE
+          cat > index.js <<'END_OF_FILE'
+          import { AppRegistry, I18nManager } from 'react-native';
+          import App from './App';
+
+          I18nManager.allowRTL(true);
+          I18nManager.forceRTL(true);
+
+          AppRegistry.registerComponent('DelfanTV', () => App);
+          END_OF_FILE
+          cat > react-native.config.js <<'END_OF_FILE'
+          module.exports = { assets: ['./assets/fonts'] };
+          END_OF_FILE
+          cat > src/theme.js <<'END_OF_FILE'
+          import { Dimensions } from 'react-native';
+
+          export const u = n => Math.round((n * Dimensions.get('window').width) / 1920);
+
+          export const C = {
+            bg: '#000000',
+            card: '#1C1C1E',
+            text: '#FFFFFF',
+            dim: 'rgba(235,235,245,0.6)',
+            glass: 'rgba(255,255,255,0.16)',
+          };
+
+          const base = { fontFamily: 'Vazir' };
+          export const T = {
+            hero: { ...base, fontSize: u(76), color: C.text, fontWeight: 'bold' },
+            row: { ...base, fontSize: u(38), color: C.text, fontWeight: 'bold' },
+            body: { ...base, fontSize: u(30), lineHeight: u(46), color: C.dim },
+            meta: { ...base, fontSize: u(28), color: C.dim },
+            btn: { ...base, fontSize: u(30), fontWeight: 'bold' },
+          };
+
+          export const PAD = u(90);
+          END_OF_FILE
+          cat > src/data.js <<'END_OF_FILE'
+          const URLS = [
+            'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8',
+            'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+            'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8',
+            'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8',
+          ];
+          const TITLES = ['شب‌های تهران', 'دریای آرام', 'مسافر', 'کوچه‌باغ', 'آخرین ایستگاه', 'پرواز', 'سایه‌ها', 'خانه‌ی کاغذی', 'رد پا'];
+          const GENRES = ['درام', 'ماجراجویی', 'تلویزیونی'];
+
+          export const ITEMS = TITLES.map((title, i) => ({
+            id: String(i + 1),
+            title,
+            meta: `${GENRES[i % 3]}  •  ${2018 + i}`,
+            desc: 'خلاصه‌ی داستان اینجا قرار می‌گیرد. این متن نمونه است و باید با توضیحات واقعی جایگزین شود.',
+            poster: `https://picsum.photos/seed/p${i}/480/720`,
+            backdrop: `https://picsum.photos/seed/b${i}/1920/1080`,
+            url: URLS[i % URLS.length],
+          }));
+
+          export const ROWS = [
+            { title: 'تازه‌ها', items: ITEMS.slice(0, 6) },
+            { title: 'پرطرفدارها', items: ITEMS.slice(3).reverse() },
+            { title: 'پیشنهاد برای شما', items: ITEMS.slice(1, 8) },
+          ];
+          END_OF_FILE
+          cat > src/components/Focusable.js <<'END_OF_FILE'
+          import React, { useRef, useState } from 'react';
+          import { Animated, Pressable } from 'react-native';
+
+          export default function Focusable({ children, style, focusedStyle, onPress, scale = 1.08, preferred }) {
+            const s = useRef(new Animated.Value(1)).current;
+            const [f, setF] = useState(false);
+            const to = v => Animated.spring(s, { toValue: v, useNativeDriver: true, friction: 8, tension: 90 }).start();
+            return (
+              <Pressable
+                hasTVPreferredFocus={preferred}
+                onPress={onPress}
+                onFocus={() => { setF(true); to(scale); }}
+                onBlur={() => { setF(false); to(1); }}>
+                <Animated.View style={[style, { transform: [{ scale: s }] }, f && focusedStyle]}>
+                  {typeof children === 'function' ? children(f) : children}
+                </Animated.View>
+              </Pressable>
+            );
+          }
+          END_OF_FILE
+          cat > src/components/Button.js <<'END_OF_FILE'
+          import React from 'react';
+          import { Text } from 'react-native';
+          import Focusable from './Focusable';
+          import { C, T, u } from '../theme';
+
+          export default function Button({ label, primary, onPress, preferred }) {
+            return (
+              <Focusable
+                preferred={preferred}
+                onPress={onPress}
+                scale={1.06}
+                style={{
+                  paddingHorizontal: u(52), height: u(80), borderRadius: u(40),
+                  justifyContent: 'center', marginEnd: u(20),
+                  backgroundColor: primary ? '#fff' : C.glass,
+                }}
+                focusedStyle={{ backgroundColor: '#fff' }}>
+                {f => <Text style={[T.btn, { color: primary || f ? '#000' : '#fff' }]}>{label}</Text>}
+              </Focusable>
+            );
+          }
+          END_OF_FILE
+          cat > src/components/Poster.js <<'END_OF_FILE'
+          import React from 'react';
+          import { Image, Text } from 'react-native';
+          import Focusable from './Focusable';
+          import { C, T, u } from '../theme';
+
+          export default function Poster({ item, onPress, w = u(240), gap = u(32) }) {
+            return (
+              <Focusable
+                onPress={onPress}
+                scale={1.1}
+                style={{ width: w, marginEnd: gap }}
+                focusedStyle={{ elevation: 16, shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 20, shadowOffset: { width: 0, height: 12 } }}>
+                {f => (
+                  <>
+                    <Image source={{ uri: item.poster }} style={{ width: w, height: w * 1.5, borderRadius: u(18), backgroundColor: C.card }} />
+                    <Text numberOfLines={1} style={[T.meta, { marginTop: u(14), color: f ? C.text : C.dim }]}>{item.title}</Text>
+                  </>
+                )}
+              </Focusable>
+            );
+          }
+          END_OF_FILE
+          cat > src/components/TopTabs.js <<'END_OF_FILE'
+          import React from 'react';
+          import { Text, View } from 'react-native';
+          import Focusable from './Focusable';
+          import { C, T, u } from '../theme';
+
+          const TABS = ['خانه', 'جستجو'];
+
+          export default function TopTabs({ tab, onChange }) {
+            return (
+              <View style={{
+                position: 'absolute', top: u(36), alignSelf: 'center', zIndex: 10, flexDirection: 'row',
+                padding: u(8), borderRadius: u(48), backgroundColor: 'rgba(44,44,46,0.72)',
+              }}>
+                {TABS.map((t, i) => (
+                  <Focusable
+                    key={t}
+                    onPress={() => onChange(i)}
+                    scale={1.05}
+                    style={{
+                      paddingHorizontal: u(52), height: u(68), borderRadius: u(34), justifyContent: 'center',
+                      backgroundColor: tab === i ? C.glass : 'transparent',
+                    }}
+                    focusedStyle={{ backgroundColor: '#fff' }}>
+                    {f => <Text style={[T.btn, { fontSize: u(28), color: f ? '#000' : '#fff' }]}>{t}</Text>}
+                  </Focusable>
+                ))}
+              </View>
+            );
+          }
+          END_OF_FILE
+          cat > src/screens/Main.js <<'END_OF_FILE'
+          import React, { useState } from 'react';
+          import { View } from 'react-native';
+          import TopTabs from '../components/TopTabs';
+          import Home from './Home';
+          import Search from './Search';
+          import { C } from '../theme';
+
+          export default function Main({ navigation }) {
+            const [tab, setTab] = useState(0);
+            return (
+              <View style={{ flex: 1, backgroundColor: C.bg }}>
+                {tab === 0 ? <Home nav={navigation} /> : <Search nav={navigation} />}
+                <TopTabs tab={tab} onChange={setTab} />
+              </View>
+            );
+          }
+          END_OF_FILE
+          cat > src/screens/Home.js <<'END_OF_FILE'
+          import React from 'react';
+          import { FlatList, Image, ScrollView, StyleSheet, Text, View } from 'react-native';
+          import LinearGradient from 'react-native-linear-gradient';
+          import Button from '../components/Button';
+          import Poster from '../components/Poster';
+          import { ITEMS, ROWS } from '../data';
+          import { PAD, T, u } from '../theme';
+
+          export default function Home({ nav }) {
+            const hero = ITEMS[0];
+            return (
+              <ScrollView contentContainerStyle={{ paddingBottom: u(80) }}>
+                <View style={{ height: u(760) }}>
+                  <Image source={{ uri: hero.backdrop }} style={StyleSheet.absoluteFill} />
+                  <LinearGradient colors={['rgba(0,0,0,0.25)', 'rgba(0,0,0,0.1)', '#000']} style={StyleSheet.absoluteFill} />
+                  <View style={{ position: 'absolute', bottom: u(60), start: PAD, width: u(900) }}>
+                    <Text style={T.hero}>{hero.title}</Text>
+                    <Text style={[T.meta, { marginTop: u(10) }]}>{hero.meta}</Text>
+                    <Text numberOfLines={2} style={[T.body, { marginVertical: u(24) }]}>{hero.desc}</Text>
+                    <View style={{ flexDirection: 'row' }}>
+                      <Button preferred primary label="پخش" onPress={() => nav.navigate('Player', { id: hero.id })} />
+                      <Button label="جزئیات" onPress={() => nav.navigate('Details', { id: hero.id })} />
+                    </View>
+                  </View>
+                </View>
+
+                {ROWS.map(r => (
+                  <View key={r.title}>
+                    <Text style={[T.row, { marginStart: PAD, marginTop: u(36) }]}>{r.title}</Text>
+                    <FlatList
+                      horizontal
+                      data={r.items}
+                      keyExtractor={i => i.id}
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={{ paddingHorizontal: PAD, paddingVertical: u(32) }}
+                      renderItem={({ item }) => <Poster item={item} onPress={() => nav.navigate('Details', { id: item.id })} />}
+                    />
+                  </View>
+                ))}
+              </ScrollView>
+            );
+          }
+          END_OF_FILE
+          cat > src/screens/Search.js <<'END_OF_FILE'
+          import React, { useMemo, useState } from 'react';
+          import { FlatList, Text, TextInput, View } from 'react-native';
+          import Poster from '../components/Poster';
+          import { ITEMS } from '../data';
+          import { C, PAD, T, u } from '../theme';
+
+          const norm = s => s.replace(/ي/g, 'ی').replace(/ك/g, 'ک').toLowerCase();
+          const COLS = 6;
+
+          export default function Search({ nav }) {
+            const [q, setQ] = useState('');
+            const res = useMemo(() => ITEMS.filter(i => norm(i.title).includes(norm(q))), [q]);
+            return (
+              <View style={{ flex: 1, paddingTop: u(150) }}>
+                <TextInput
+                  value={q}
+                  onChangeText={setQ}
+                  placeholder="جستجوی فیلم و سریال"
+                  placeholderTextColor={C.dim}
+                  style={[T.row, {
+                    fontWeight: 'normal', height: u(88), marginHorizontal: PAD, borderRadius: u(20),
+                    backgroundColor: C.card, paddingHorizontal: u(32),
+                  }]}
+                />
+                <FlatList
+                  data={res}
+                  numColumns={COLS}
+                  keyExtractor={i => i.id}
+                  contentContainerStyle={{ paddingHorizontal: PAD, paddingVertical: u(40) }}
+                  columnWrapperStyle={{ marginBottom: u(36) }}
+                  ListEmptyComponent={<Text style={T.body}>نتیجه‌ای پیدا نشد. عبارت دیگری را امتحان کنید.</Text>}
+                  renderItem={({ item }) => <Poster item={item} onPress={() => nav.navigate('Details', { id: item.id })} />}
+                />
+              </View>
+            );
+          }
+          END_OF_FILE
+          cat > src/screens/Details.js <<'END_OF_FILE'
+          import React from 'react';
+          import { Image, StyleSheet, Text, View } from 'react-native';
+          import LinearGradient from 'react-native-linear-gradient';
+          import Button from '../components/Button';
+          import { ITEMS } from '../data';
+          import { C, PAD, T, u } from '../theme';
+
+          export default function Details({ route, navigation }) {
+            const it = ITEMS.find(i => i.id === route.params.id);
+            return (
+              <View style={{ flex: 1, backgroundColor: C.bg }}>
+                <Image source={{ uri: it.backdrop }} style={StyleSheet.absoluteFill} />
+                <LinearGradient colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.55)', '#000']} style={StyleSheet.absoluteFill} />
+                <View style={{ position: 'absolute', bottom: u(90), start: PAD, width: u(1000) }}>
+                  <Text style={T.hero}>{it.title}</Text>
+                  <Text style={[T.meta, { marginTop: u(10) }]}>{it.meta}</Text>
+                  <Text style={[T.body, { marginVertical: u(28) }]}>{it.desc}</Text>
+                  <View style={{ flexDirection: 'row' }}>
+                    <Button preferred primary label="پخش" onPress={() => navigation.navigate('Player', { id: it.id })} />
+                    <Button label="بازگشت" onPress={() => navigation.goBack()} />
+                  </View>
+                </View>
+              </View>
+            );
+          }
+          END_OF_FILE
+          cat > src/screens/Player.js <<'END_OF_FILE'
+          import React, { useState } from 'react';
+          import { StatusBar, StyleSheet, Text, View } from 'react-native';
+          import Video from 'react-native-video';
+          import { ITEMS } from '../data';
+          import { T, u } from '../theme';
+
+          export default function Player({ route }) {
+            const it = ITEMS.find(i => i.id === route.params.id);
+            const [failed, setFailed] = useState(false);
+            return (
+              <View style={{ flex: 1, backgroundColor: '#000' }}>
+                <StatusBar hidden />
+                <Video
+                  source={{ uri: it.url }}
+                  style={StyleSheet.absoluteFill}
+                  resizeMode="contain"
+                  controls
+                  onError={() => setFailed(true)}
+                />
+                {failed && (
+                  <View style={{ ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={[T.row, { textAlign: 'center', paddingHorizontal: u(120) }]}>پخش انجام نشد. لینک ویدیو را بررسی کنید.</Text>
+                  </View>
+                )}
+              </View>
+            );
+          }
+          END_OF_FILE
+
+      - name: Download Vazir font
+        run: |
+          curl -fL -o DelfanTV/assets/fonts/Vazir.ttf https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/ttf/Vazirmatn-Regular.ttf || rm -f DelfanTV/assets/fonts/Vazir.ttf
+          cd DelfanTV && npx --yes react-native-asset
+
+      - name: Enable RTL
+        run: |
+          python3 - <<'EOF'
+          import glob
+          files = glob.glob('DelfanTV/android/**/MainApplication.*', recursive=True)
+          for f in files:
+              with open(f, 'r', encoding='utf-8') as fp:
+                  code = fp.read()
+              if 'I18nUtil' not in code:
+                  semi = ';' if f.endswith('.java') else ''
+                  code = code.replace(
+                      'import com.facebook.react.ReactApplication',
+                      f'import com.facebook.react.modules.i18nmanager.I18nUtil{semi}\nimport com.facebook.react.ReactApplication'
+                  )
+                  code = code.replace(
+                      'super.onCreate()',
+                      f'super.onCreate(){semi}\n    I18nUtil.getInstance().allowRTL(this, true){semi}\n    I18nUtil.getInstance().forceRTL(this, true){semi}'
+                  )
+                  with open(f, 'w', encoding='utf-8') as fp:
+                      fp.write(code)
+          EOF
+
+      - name: Build release APK
+        run: |
+          cd DelfanTV/android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DelfanTV-apk
+          path: DelfanTV/android/app/build/outputs/apk/release/*.apk
